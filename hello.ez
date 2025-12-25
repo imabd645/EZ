@@ -1,0 +1,5 @@
+name = [1, 2, 3]
+
+
+x=len(name)
+out x
