@@ -48,12 +48,14 @@ void error(const string& m, int l) {
 
 // ===================== VALUE =====================
 struct Value {
-    enum Type { NUM, STR, BOOL, NONE, FUNC_REF, ARRAY } type = NONE;
+    enum Type { NUM, STR, BOOL, NONE, FUNC_REF, ARRAY, FILE } type = NONE;
     double num = 0;
     string str;
     bool boolean = false;
     string funcName;
     shared_ptr<vector<Value>> array;
+    shared_ptr<fstream> fileHandle;
+    string filePath;
 
     static Value Number(double v) { Value x; x.type = NUM; x.num = v; return x; }
     static Value String(const string& s) { Value x; x.type = STR; x.str = s; return x; }
@@ -65,6 +67,13 @@ struct Value {
         x.type = ARRAY; 
         x.array = make_shared<vector<Value>>(items); 
         return x; 
+    }
+    static Value File(const string& path, shared_ptr<fstream> handle) {
+        Value x;
+        x.type = FILE;
+        x.filePath = path;
+        x.fileHandle = handle;
+        return x;
     }
 
     string toString() const {
@@ -88,6 +97,7 @@ struct Value {
             result += "]";
             return result;
         }
+        if (type == FILE) return "<file:" + filePath + ">";
         return "";
     }
 

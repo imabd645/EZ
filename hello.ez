@@ -1,5 +1,3 @@
-name = [1, 2, 3]
-
-
-x=len(name)
-out x
+text = "HELLO"
+out text.lower()
+out text.length()
