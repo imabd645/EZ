@@ -1,8 +1,6 @@
-in x
-count=1
-until x equal 0{
-    x=x/10
-    count++
-
+task add(x) {
+    give task(y) { give x + y }
 }
-out count
+
+f = add(5)
+out f(3)   // 8

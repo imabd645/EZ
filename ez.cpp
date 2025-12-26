@@ -454,6 +454,10 @@ vector<Token> tokenize(const string &src)
 }
 
 // ===================== VALUE =====================
+// Forward declaration for closure
+struct Value;
+using Closure = shared_ptr<unordered_map<string, Value>>;
+
 struct Value
 {
     enum Type
@@ -461,12 +465,18 @@ struct Value
         NUM,
         STR,
         BOOL,
-        ARR
+        ARR,
+        FUNC
     } type;
     double num = 0;
     string str = "";
     bool boolean = false;
     vector<Value> arr;
+    
+    // Function-specific fields
+    vector<string> funcParams;
+    size_t funcBodyStart = 0;
+    Closure closure;
 
     Value() : type(NUM), num(0) {}
 
@@ -498,6 +508,15 @@ struct Value
         val.arr = a;
         return val;
     }
+    static Value Func(const vector<string> &params, size_t bodyStart, Closure capturedScope)
+    {
+        Value val;
+        val.type = FUNC;
+        val.funcParams = params;
+        val.funcBodyStart = bodyStart;
+        val.closure = capturedScope;
+        return val;
+    }
 
     bool toBool() const
     {
@@ -509,6 +528,8 @@ struct Value
             return !str.empty();
         if (type == ARR)
             return !arr.empty();
+        if (type == FUNC)
+            return true;  // Functions are always truthy
         return false;
     }
 
@@ -562,6 +583,8 @@ struct Value
             s += "]";
             return s;
         }
+        if (type == FUNC)
+            return "<function>";
         return "";
     }
 
@@ -577,6 +600,8 @@ struct Value
             return str == other.str;
         if (type == BOOL)
             return boolean == other.boolean;
+        if (type == FUNC)
+            return funcBodyStart == other.funcBodyStart;  // Same function if same body
         return false;
     }
 };
@@ -669,6 +694,20 @@ class EZ
                 return true;
         }
         return false;
+    }
+
+    // Capture all variables from current scope chain into a closure
+    Closure captureScope()
+    {
+        auto captured = make_shared<unordered_map<string, Value>>();
+        for (const auto &scope : scopes)
+        {
+            for (const auto &pair : scope)
+            {
+                (*captured)[pair.first] = pair.second;
+            }
+        }
+        return captured;
     }
 
     void initBuiltins()
@@ -801,11 +840,48 @@ class EZ
             return Value::Array(arr);
         }
 
+        // Anonymous function (lambda): task(params) { body }
+        if (cur().type == FUNC)
+        {
+            next();  // consume 'task'
+            
+            if (cur().type != LPAREN)
+                error("Expected '(' after 'task' in lambda", cur().line);
+            next();
+            
+            vector<string> params;
+            while (cur().type != RPAREN && cur().type != END)
+            {
+                if (cur().type != IDENT)
+                    error("Expected parameter name", cur().line);
+                params.push_back(cur().text);
+                next();
+                if (cur().type == COMMA)
+                    next();
+            }
+            if (cur().type != RPAREN)
+                error("Expected ')' after parameters", cur().line);
+            next();
+            
+            // Capture current scope for closure
+            Closure captured = captureScope();
+            
+            // Record body start position
+            size_t bodyStart = p;
+            
+            // Skip over the function body (we'll execute it later when called)
+            skipBlock();
+            
+            return Value::Func(params, bodyStart, captured);
+        }
+
         if (cur().type == IDENT)
         {
             string n = cur().text;
+            int callLine = cur().line;
             next();
 
+            // Function call - either named function or variable holding function
             if (cur().type == LPAREN)
             {
                 next();
@@ -819,6 +895,35 @@ class EZ
                 if (cur().type != RPAREN)
                     error("Expected ')'", cur().line);
                 next();
+                
+                // Check if it's a variable holding a function value
+                if (varExists(n))
+                {
+                    Value v = getVar(n);
+                    if (v.type == Value::FUNC)
+                    {
+                        Value result = callFunctionValue(v, args, callLine);
+                        // Support chained calls like f(3)(4)
+                        while (cur().type == LPAREN)
+                        {
+                            next();
+                            vector<Value> chainArgs;
+                            while (cur().type != RPAREN && cur().type != END)
+                            {
+                                chainArgs.push_back(logicalOr());
+                                if (cur().type == COMMA)
+                                    next();
+                            }
+                            if (cur().type != RPAREN)
+                                error("Expected ')'", cur().line);
+                            next();
+                            result = callFunctionValue(result, chainArgs, callLine);
+                        }
+                        return result;
+                    }
+                }
+                
+                // Otherwise it's a named function call
                 return callFunction(n, args);
             }
 
@@ -1040,6 +1145,58 @@ class EZ
         }
 
         p = func.bodyStart;
+        flow = NONE;
+        returnValue = Value::Number(0);
+
+        executeBlock();
+
+        Value result = returnValue;
+
+        popScope();
+        recursionDepth--;
+        p = savedPos;
+        flow = savedFlow;
+
+        return result;
+    }
+
+    // Call a function stored as a Value (first-class function / closure)
+    Value callFunctionValue(const Value &func, vector<Value> args, int callLine)
+    {
+        if (func.type != Value::FUNC)
+            error("Not a function", callLine);
+
+        if (args.size() != func.funcParams.size())
+            error("Function expects " + to_string(func.funcParams.size()) +
+                      " arguments, got " + to_string(args.size()),
+                  callLine);
+
+        if (recursionDepth >= MAX_RECURSION)
+            error("Maximum recursion depth exceeded", callLine);
+
+        size_t savedPos = p;
+        ControlFlow savedFlow = flow;
+        recursionDepth++;
+
+        // Create new scope and restore closure variables
+        pushScope();
+        
+        // First, add all captured closure variables
+        if (func.closure)
+        {
+            for (const auto &pair : *func.closure)
+            {
+                scopes.back()[pair.first] = pair.second;
+            }
+        }
+        
+        // Then add the parameters (which may shadow closure vars)
+        for (size_t i = 0; i < args.size(); i++)
+        {
+            scopes.back()[func.funcParams[i]] = args[i];
+        }
+
+        p = func.funcBodyStart;
         flow = NONE;
         returnValue = Value::Number(0);
 
