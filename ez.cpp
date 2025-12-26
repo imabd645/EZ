@@ -5,14 +5,8 @@
 #include <sstream>
 #include <fstream>
 #include <cctype>
-#include <functional>
 #include <memory>
-#include <cmath>
-#include <chrono>
-#include <thread>
-#include <random>
-#include <algorithm>
-#include <sys/stat.h>
+#include <limits>
 
 using namespace std;
 
@@ -21,13 +15,13 @@ enum TokenType {
     NUMBER, STRING, IDENT, BOOL,
     PLUS, MINUS, MUL, DIV, MOD,
     ASSIGN, LPAREN, RPAREN,
-    LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, DOT, SEMICOLON,
+    LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA,
     IF, ELSE, FOR, TO, UNTIL,
     FUNC, RETURN, PRINT, INPUT,
     EQ, LT, LTE, GT, GTE, NEQ,
     AND, OR, NOT,
     BREAK, CONTINUE,
-    INC, DEC, WHILE,
+    INC, DEC,
     END
 };
 
@@ -41,1453 +35,832 @@ struct Token {
 class InterpreterException : public exception {
     string msg;
 public:
-    InterpreterException(const string& m, int l) {
-        msg = "Error on line " + to_string(l) + ": " + m;
+    InterpreterException(const string &message, int line) {
+        msg = "Error on line " + to_string(line) + ": " + message;
     }
-    const char* what() const noexcept override { return msg.c_str(); }
+    const char* what() const noexcept override {
+        return msg.c_str();
+    }
 };
 
-void error(const string& m, int l) {
-    throw InterpreterException(m, l);
+void error(const string &msg, int line) {
+    throw InterpreterException(msg, line);
 }
 
-// ===================== VALUE =====================
-struct Value {
-    enum Type { NUM, STR, BOOL, NONE, FUNC_REF, ARRAY, FILE } type = NONE;
-    double num = 0;
-    string str;
-    bool boolean = false;
-    string funcName;
-    shared_ptr<vector<Value>> array;
-    shared_ptr<fstream> fileHandle;
-    string filePath;
-
-    static Value Number(double v) { Value x; x.type = NUM; x.num = v; return x; }
-    static Value String(const string& s) { Value x; x.type = STR; x.str = s; return x; }
-    static Value Bool(bool b) { Value x; x.type = BOOL; x.boolean = b; return x; }
-    static Value None() { Value x; x.type = NONE; return x; }
-    static Value FuncRef(const string& n) { Value x; x.type = FUNC_REF; x.funcName = n; return x; }
-    static Value Array(vector<Value> items = {}) { 
-        Value x; 
-        x.type = ARRAY; 
-        x.array = make_shared<vector<Value>>(items); 
-        return x; 
+// ===================== FILE =====================
+string readFile(const string &name) {
+    ifstream f(name);
+    if (!f) {
+        cerr << "Error: File not found: " << name << endl;
+        exit(1);
     }
-    static Value File(const string& path, shared_ptr<fstream> handle) {
-        Value x;
-        x.type = FILE;
-        x.filePath = path;
-        x.fileHandle = handle;
-        return x;
-    }
-
-    string toString() const {
-        if (type == STR) return str;
-        if (type == NUM) {
-            double intpart;
-            if (modf(num, &intpart) == 0.0) {
-                return to_string((long long)num);
-            }
-            return to_string(num);
-        }
-        if (type == BOOL) return boolean ? "yes" : "no";
-        if (type == NONE) return "none";
-        if (type == FUNC_REF) return "<function:" + funcName + ">";
-        if (type == ARRAY) {
-            string result = "[";
-            for (size_t i = 0; i < array->size(); i++) {
-                if (i > 0) result += ", ";
-                result += (*array)[i].toString();
-            }
-            result += "]";
-            return result;
-        }
-        if (type == FILE) return "<file:" + filePath + ">";
-        return "";
-    }
-
-    double toNumber() const {
-        if (type == NUM) return num;
-        if (type == BOOL) return boolean ? 1 : 0;
-        if (type == ARRAY) return array->size();
-        if (type == STR) {
-            try { return stod(str); }
-            catch (...) { return 0; }
-        }
-        return 0;
-    }
-
-    bool toBool() const {
-        if (type == BOOL) return boolean;
-        if (type == NUM) return num != 0;
-        if (type == STR) return !str.empty();
-        if (type == ARRAY) return !array->empty();
-        return false;
-    }
-};
-
-// ===================== AST NODES =====================
-struct ASTNode {
-    virtual ~ASTNode() = default;
-};
-
-struct NumberNode : ASTNode {
-    double value;
-    NumberNode(double v) : value(v) {}
-};
-
-struct StringNode : ASTNode {
-    string value;
-    StringNode(const string& v) : value(v) {}
-};
-
-struct BoolNode : ASTNode {
-    bool value;
-    BoolNode(bool v) : value(v) {}
-};
-
-struct VarNode : ASTNode {
-    string name;
-    VarNode(const string& n) : name(n) {}
-};
-
-struct BinOpNode : ASTNode {
-    TokenType op;
-    shared_ptr<ASTNode> left, right;
-    BinOpNode(TokenType o, shared_ptr<ASTNode> l, shared_ptr<ASTNode> r) 
-        : op(o), left(l), right(r) {}
-};
-
-struct UnaryOpNode : ASTNode {
-    TokenType op;
-    shared_ptr<ASTNode> operand;
-    UnaryOpNode(TokenType o, shared_ptr<ASTNode> n) : op(o), operand(n) {}
-};
-
-struct AssignNode : ASTNode {
-    string name;
-    shared_ptr<ASTNode> value;
-    AssignNode(const string& n, shared_ptr<ASTNode> v) : name(n), value(v) {}
-};
-
-struct CallNode : ASTNode {
-    string name;
-    vector<shared_ptr<ASTNode>> args;
-    CallNode(const string& n, vector<shared_ptr<ASTNode>> a) : name(n), args(a) {}
-};
-
-struct MethodCallNode : ASTNode {
-    string objName;
-    string method;
-    vector<shared_ptr<ASTNode>> args;
-    MethodCallNode(const string& o, const string& m, vector<shared_ptr<ASTNode>> a) 
-        : objName(o), method(m), args(a) {}
-};
-
-struct BlockNode : ASTNode {
-    vector<shared_ptr<ASTNode>> statements;
-    BlockNode(vector<shared_ptr<ASTNode>> s) : statements(s) {}
-};
-
-struct IfNode : ASTNode {
-    shared_ptr<ASTNode> condition;
-    shared_ptr<ASTNode> thenBlock;
-    shared_ptr<ASTNode> elseBlock;
-    IfNode(shared_ptr<ASTNode> c, shared_ptr<ASTNode> t, shared_ptr<ASTNode> e = nullptr) 
-        : condition(c), thenBlock(t), elseBlock(e) {}
-};
-
-struct WhileNode : ASTNode {
-    shared_ptr<ASTNode> condition;
-    shared_ptr<ASTNode> body;
-    bool isUntil;
-    WhileNode(shared_ptr<ASTNode> c, shared_ptr<ASTNode> b, bool u = false) 
-        : condition(c), body(b), isUntil(u) {}
-};
-
-struct ForNode : ASTNode {
-    string var;
-    shared_ptr<ASTNode> start;
-    shared_ptr<ASTNode> end;
-    shared_ptr<ASTNode> body;
-    ForNode(const string& v, shared_ptr<ASTNode> s, shared_ptr<ASTNode> e, shared_ptr<ASTNode> b) 
-        : var(v), start(s), end(e), body(b) {}
-};
-
-struct FuncDefNode : ASTNode {
-    string name;
-    vector<string> params;
-    shared_ptr<ASTNode> body;
-    FuncDefNode(const string& n, vector<string> p, shared_ptr<ASTNode> b) 
-        : name(n), params(p), body(b) {}
-};
-
-struct ReturnNode : ASTNode {
-    shared_ptr<ASTNode> value;
-    ReturnNode(shared_ptr<ASTNode> v) : value(v) {}
-};
-
-struct PrintNode : ASTNode {
-    shared_ptr<ASTNode> value;
-    PrintNode(shared_ptr<ASTNode> v) : value(v) {}
-};
-
-struct InputNode : ASTNode {
-    string varName;
-    InputNode(const string& n) : varName(n) {}
-};
-
-struct ArrayLiteralNode : ASTNode {
-    vector<shared_ptr<ASTNode>> elements;
-    ArrayLiteralNode(vector<shared_ptr<ASTNode>> e) : elements(e) {}
-};
-
-struct IndexAccessNode : ASTNode {
-    string arrayName;
-    shared_ptr<ASTNode> index;
-    IndexAccessNode(const string& n, shared_ptr<ASTNode> i) : arrayName(n), index(i) {}
-};
-
-struct IndexAssignNode : ASTNode {
-    string arrayName;
-    shared_ptr<ASTNode> index;
-    shared_ptr<ASTNode> value;
-    IndexAssignNode(const string& n, shared_ptr<ASTNode> i, shared_ptr<ASTNode> v) 
-        : arrayName(n), index(i), value(v) {}
-};
-
-struct BreakNode : ASTNode {};
-struct ContinueNode : ASTNode {};
+    stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
 
 // ===================== LEXER =====================
-vector<Token> tokenize(const string& src) {
-    vector<Token> t;
+vector<Token> tokenize(const string &src) {
+    vector<Token> tokens;
     int line = 1;
 
     for (size_t i = 0; i < src.size();) {
         if (src[i] == '\n') { line++; i++; continue; }
         if (isspace(src[i])) { i++; continue; }
 
-        // Comments
-        if (src[i] == '#') {
-            while (i < src.size() && src[i] != '\n') i++;
+        // Comment
+        if (src[i] == '/' && i+1<src.size() && src[i+1] == '/') {
+            while (i<src.size() && src[i] != '\n') i++;
             continue;
         }
 
-        // Numbers
+        // Number
         if (isdigit(src[i])) {
             string n;
-            while (i < src.size() && (isdigit(src[i]) || src[i] == '.'))
-                n += src[i++];
-            t.push_back({ NUMBER, n, line });
+            bool hasDot = false;
+            while (i<src.size() && (isdigit(src[i]) || src[i]=='.')) {
+                if (src[i] == '.') {
+                    if (hasDot) error("Invalid number format", line);
+                    hasDot = true;
+                }
+                n+=src[i++];
+            }
+            tokens.push_back({NUMBER,n,line});
             continue;
         }
 
-        // Strings
+        // String
         if (src[i] == '"') {
             i++;
             string s;
-            while (i < src.size() && src[i] != '"') {
-                if (src[i] == '\\' && i + 1 < src.size()) {
+            while (i<src.size() && src[i]!='"') {
+                if (src[i] == '\\' && i+1 < src.size()) {
                     i++;
                     if (src[i] == 'n') s += '\n';
                     else if (src[i] == 't') s += '\t';
+                    else if (src[i] == '\\') s += '\\';
+                    else if (src[i] == '"') s += '"';
                     else s += src[i];
                     i++;
                 } else {
-                    s += src[i++];
+                    s+=src[i++];
                 }
             }
+            if (i >= src.size()) error("Unterminated string", line);
             i++;
-            t.push_back({ STRING, s, line });
+            tokens.push_back({STRING,s,line});
             continue;
         }
 
-        // Identifiers and keywords
-        if (isalpha(src[i]) || src[i] == '_') {
+        // Comparison words (check BEFORE identifiers!)
+        if (i + 12 <= src.size() && src.substr(i,12)=="greaterthen"){ 
+            tokens.push_back({GTE,">=",line}); i+=12; continue; 
+        }
+        if (i + 9 <= src.size() && src.substr(i,9)=="lessthen"){ 
+            tokens.push_back({LTE,"<=",line}); i+=9; continue; 
+        }
+        if (i + 8 <= src.size() && src.substr(i,8)=="notequal"){ 
+            tokens.push_back({NEQ,"!=",line}); i+=8; continue; 
+        }
+        if (i + 7 <= src.size() && src.substr(i,7)=="greater"){ 
+            tokens.push_back({GT,">",line}); i+=7; continue; 
+        }
+        if (i + 5 <= src.size() && src.substr(i,5)=="equal"){ 
+            tokens.push_back({EQ,"==",line}); i+=5; continue; 
+        }
+        if (i + 4 <= src.size() && src.substr(i,4)=="less"){ 
+            tokens.push_back({LT,"<",line}); i+=4; continue; 
+        }
+
+        // Identifiers / Keywords
+        if (isalpha(src[i])) {
             string id;
-            while (i < src.size() && (isalnum(src[i]) || src[i] == '_'))
-                id += src[i++];
+            while (i<src.size() && (isalnum(src[i]) || src[i]=='_')) id += src[i++];
 
-            if (id == "when") t.push_back({ IF, id, line });
-            else if (id == "other") t.push_back({ ELSE, id, line });
-            else if (id == "repeat") t.push_back({ FOR, id, line });
-            else if (id == "loop") t.push_back({ WHILE, id, line });
-            else if (id == "to") t.push_back({ TO, id, line });
-            else if (id == "until") t.push_back({ UNTIL, id, line });
-            else if (id == "task") t.push_back({ FUNC, id, line });
-            else if (id == "give") t.push_back({ RETURN, id, line });
-            else if (id == "out") t.push_back({ PRINT, id, line });
-            else if (id == "in") t.push_back({ INPUT, id, line });
-            else if (id == "yes") t.push_back({ BOOL, "1", line });
-            else if (id == "no") t.push_back({ BOOL, "0", line });
-            else if (id == "stop") t.push_back({ BREAK, id, line });
-            else if (id == "skip") t.push_back({ CONTINUE, id, line });
-            else if (id == "and") t.push_back({ AND, id, line });
-            else if (id == "or") t.push_back({ OR, id, line });
-            else if (id == "not") t.push_back({ NOT, id, line });
-            else t.push_back({ IDENT, id, line });
+            if (id=="when") tokens.push_back({IF,id,line});
+            else if (id=="other") tokens.push_back({ELSE,id,line});
+            else if (id=="repeat") tokens.push_back({FOR,id,line});
+            else if (id=="to") tokens.push_back({TO,id,line});
+            else if (id=="until") tokens.push_back({UNTIL,id,line});
+            else if (id=="task") tokens.push_back({FUNC,id,line});
+            else if (id=="give") tokens.push_back({RETURN,id,line});
+            else if (id=="out") tokens.push_back({PRINT,id,line});
+            else if (id=="in") tokens.push_back({INPUT,id,line});
+            else if (id=="yes") tokens.push_back({BOOL,"1",line});
+            else if (id=="no") tokens.push_back({BOOL,"0",line});
+            else if (id=="escape") tokens.push_back({BREAK,id,line});
+            else if (id=="skip") tokens.push_back({CONTINUE,id,line});
+            else if (id=="and") tokens.push_back({AND,id,line});
+            else if (id=="or") tokens.push_back({OR,id,line});
+            else if (id=="not") tokens.push_back({NOT,id,line});
+            else tokens.push_back({IDENT,id,line});
             continue;
         }
 
-        // Two-character operators
-        if (i + 1 < src.size()) {
-            string two = string() + src[i] + src[i + 1];
-            if (two == "==") { t.push_back({ EQ, two, line }); i += 2; continue; }
-            if (two == "!=") { t.push_back({ NEQ, two, line }); i += 2; continue; }
-            if (two == "<=") { t.push_back({ LTE, two, line }); i += 2; continue; }
-            if (two == ">=") { t.push_back({ GTE, two, line }); i += 2; continue; }
-            if (two == "++") { t.push_back({ INC, two, line }); i += 2; continue; }
-            if (two == "--") { t.push_back({ DEC, two, line }); i += 2; continue; }
+        // Operators
+        if (src[i]=='+'){ 
+            if (i+1<src.size() && src[i+1]=='+') { tokens.push_back({INC,"++",line}); i+=2; continue; }
+            tokens.push_back({PLUS,"+",line}); i++; continue; 
         }
+        if (src[i]=='-'){ 
+            if (i+1<src.size() && src[i+1]=='-') { tokens.push_back({DEC,"--",line}); i+=2; continue; }
+            tokens.push_back({MINUS,"-",line}); i++; continue; 
+        }
+        if (src[i]=='*'){ tokens.push_back({MUL,"*",line}); i++; continue; }
+        if (src[i]=='/'){ tokens.push_back({DIV,"/",line}); i++; continue; }
+        if (src[i]=='%'){ tokens.push_back({MOD,"%",line}); i++; continue; }
+        if (src[i]=='='){
+            if (i+1<src.size() && src[i+1]=='='){ tokens.push_back({EQ,"==",line}); i+=2; continue; }
+            tokens.push_back({ASSIGN,"=",line}); i++; continue;
+        }
+        if (src[i]=='!'){ 
+            if (i+1<src.size() && src[i+1]=='='){ tokens.push_back({NEQ,"!=",line}); i+=2; continue; }
+            error("Unexpected '!' character", line);
+        }
+        if (src[i]=='<'){
+            if (i+1<src.size() && src[i+1]=='='){ tokens.push_back({LTE,"<=",line}); i+=2; continue; }
+            tokens.push_back({LT,"<",line}); i++; continue;
+        }
+        if (src[i]=='>'){
+            if (i+1<src.size() && src[i+1]=='='){ tokens.push_back({GTE,">=",line}); i+=2; continue; }
+            tokens.push_back({GT,">",line}); i++; continue;
+        }
+        if (src[i]=='('){ tokens.push_back({LPAREN,"(",line}); i++; continue; }
+        if (src[i]==')'){ tokens.push_back({RPAREN,")",line}); i++; continue; }
+        if (src[i]=='{'){ tokens.push_back({LBRACE,"{",line}); i++; continue; }
+        if (src[i]=='}'){ tokens.push_back({RBRACE,"}",line}); i++; continue; }
+        if (src[i]=='['){ tokens.push_back({LBRACKET,"[",line}); i++; continue; }
+        if (src[i]==']'){ tokens.push_back({RBRACKET,"]",line}); i++; continue; }
+        if (src[i]==','){ tokens.push_back({COMMA,",",line}); i++; continue; }
 
-        // Single-character operators
-        if (src[i] == '.') { t.push_back({ DOT, ".", line }); i++; continue; }
-        if (src[i] == '+') { t.push_back({ PLUS, "+", line }); i++; continue; }
-        if (src[i] == '-') { t.push_back({ MINUS, "-", line }); i++; continue; }
-        if (src[i] == '*') { t.push_back({ MUL, "*", line }); i++; continue; }
-        if (src[i] == '/') { t.push_back({ DIV, "/", line }); i++; continue; }
-        if (src[i] == '%') { t.push_back({ MOD, "%", line }); i++; continue; }
-        if (src[i] == '=') { t.push_back({ ASSIGN, "=", line }); i++; continue; }
-        if (src[i] == '(') { t.push_back({ LPAREN, "(", line }); i++; continue; }
-        if (src[i] == ')') { t.push_back({ RPAREN, ")", line }); i++; continue; }
-        if (src[i] == '{') { t.push_back({ LBRACE, "{", line }); i++; continue; }
-        if (src[i] == '}') { t.push_back({ RBRACE, "}", line }); i++; continue; }
-        if (src[i] == '[') { t.push_back({ LBRACKET, "[", line }); i++; continue; }
-        if (src[i] == ']') { t.push_back({ RBRACKET, "]", line }); i++; continue; }
-        if (src[i] == ',') { t.push_back({ COMMA, ",", line }); i++; continue; }
-        if (src[i] == ';') { t.push_back({ SEMICOLON, ";", line }); i++; continue; }
-        if (src[i] == '<') { t.push_back({ LT, "<", line }); i++; continue; }
-        if (src[i] == '>') { t.push_back({ GT, ">", line }); i++; continue; }
-
-        error("Unknown character: " + string(1, src[i]), line);
+        error("Unknown character: "+string(1,src[i]),line);
     }
 
-    t.push_back({ END, "", line });
-    return t;
+    tokens.push_back({END,"",line});
+    return tokens;
 }
 
-// ===================== PARSER =====================
-class Parser {
-    vector<Token> tokens;
-    size_t pos = 0;
+// ===================== VALUE =====================
+struct Value {
+    enum Type { NUM, STR, BOOL, ARR } type;
+    double num = 0;
+    string str = "";
+    bool boolean = false;
+    vector<Value> arr;
 
-    Token current() {
-        if (pos < tokens.size()) return tokens[pos];
-        return tokens.back();
+    Value() : type(NUM), num(0) {}
+    
+    static Value Number(double v) { 
+        Value val; val.type = NUM; val.num = v; return val;
     }
-
-    void advance() {
-        if (pos < tokens.size()) pos++;
+    static Value String(const string &s) { 
+        Value val; val.type = STR; val.str = s; return val;
     }
-
-    bool match(TokenType type) {
-        if (current().type == type) {
-            advance();
-            return true;
-        }
+    static Value Bool(bool b) { 
+        Value val; val.type = BOOL; val.boolean = b; return val;
+    }
+    static Value Array(const vector<Value> &a) { 
+        Value val; val.type = ARR; val.arr = a; return val;
+    }
+    
+    bool toBool() const {
+        if (type == BOOL) return boolean;
+        if (type == NUM) return num != 0;
+        if (type == STR) return !str.empty();
+        if (type == ARR) return !arr.empty();
         return false;
     }
-
-    void expect(TokenType type, const string& msg) {
-        if (!match(type)) {
-            error(msg, current().line);
+    
+    double toNumber() const {
+        if (type == NUM) return num;
+        if (type == BOOL) return boolean ? 1.0 : 0.0;
+        if (type == STR) {
+            try {
+                return stod(str);
+            } catch (...) {
+                return 0.0;
+            }
         }
+        return 0.0;
+    }
+    
+    string toString() const {
+        if (type == STR) return str;
+        if (type == NUM) {
+            if (num == (int)num) {
+                return to_string((int)num);
+            }
+            string s = to_string(num);
+            s.erase(s.find_last_not_of('0') + 1, string::npos);
+            if (s.back() == '.') s.pop_back();
+            return s;
+        }
+        if (type == BOOL) return boolean ? "yes" : "no";
+        if (type == ARR) {
+            string s = "[";
+            for (size_t i = 0; i < arr.size(); i++) {
+                s += arr[i].toString();
+                if (i < arr.size() - 1) s += ", ";
+            }
+            s += "]";
+            return s;
+        }
+        return "";
     }
 
-    shared_ptr<ASTNode> primary() {
-        if (current().type == NUMBER) {
-            double val = stod(current().text);
-            advance();
-            return make_shared<NumberNode>(val);
+    bool equals(const Value &other) const {
+        if (type != other.type) {
+            // Compare by string representation for mixed types
+            return toString() == other.toString();
         }
+        if (type == NUM) return num == other.num;
+        if (type == STR) return str == other.str;
+        if (type == BOOL) return boolean == other.boolean;
+        return false;
+    }
+};
 
-        if (current().type == STRING) {
-            string val = current().text;
-            advance();
-            return make_shared<StringNode>(val);
-        }
+// ===================== FUNCTION =====================
+struct Function {
+    vector<string> params;
+    size_t bodyStart;
+};
 
-        if (current().type == BOOL) {
-            bool val = current().text == "1";
-            advance();
-            return make_shared<BoolNode>(val);
-        }
+// ===================== CONTROL FLOW =====================
+enum ControlFlow { NONE, BREAK_FLAG, CONTINUE_FLAG, RETURN_FLAG };
 
-        if (current().type == LBRACKET) {
-            advance();
-            vector<shared_ptr<ASTNode>> elements;
-            
-            while (current().type != RBRACKET) {
-                elements.push_back(expression());
-                if (current().type == COMMA) advance();
+// ===================== INTERPRETER =====================
+class EZ {
+    vector<Token> t;
+    size_t p = 0;
+    vector<unordered_map<string, Value>> scopes;
+    unordered_map<string, Function> functions;
+    ControlFlow flow = NONE;
+    Value returnValue;
+    int recursionDepth = 0;
+    static const int MAX_RECURSION = 1000;
+
+    Token cur() { 
+        if (p >= t.size()) return t[t.size()-1];
+        return t[p]; 
+    }
+    
+    void next() { if (p < t.size()) p++; }
+    
+    Token peek(int offset = 1) { 
+        if (p + offset < t.size()) return t[p + offset];
+        return t[t.size() - 1];
+    }
+
+    void pushScope() { scopes.push_back({}); }
+    void popScope() { if (!scopes.empty()) scopes.pop_back(); }
+
+    void setVar(const string &name, const Value &val) {
+        for (int i = scopes.size() - 1; i >= 0; i--) {
+            if (scopes[i].count(name)) {
+                scopes[i][name] = val;
+                return;
             }
-            
-            expect(RBRACKET, "Expected ']'");
-            return make_shared<ArrayLiteralNode>(elements);
+        }
+        scopes.back()[name] = val;
+    }
+
+    Value getVar(const string &name) {
+        for (int i = scopes.size() - 1; i >= 0; i--) {
+            if (scopes[i].count(name)) return scopes[i][name];
+        }
+        error("Undefined variable: " + name, cur().line);
+        return Value::Number(0);
+    }
+
+    Value factor() {
+        if (cur().type == LPAREN) {
+            next();
+            Value v = logicalOr();
+            if (cur().type != RPAREN) error("Expected ')'", cur().line);
+            next();
+            return v;
         }
 
-        if (current().type == LPAREN) {
-            advance();
-            auto expr = expression();
-            expect(RPAREN, "Expected ')'");
-            return expr;
+        if (cur().type == NOT) {
+            next();
+            Value v = factor();
+            return Value::Bool(!v.toBool());
         }
 
-        if (current().type == NOT) {
-            advance();
-            return make_shared<UnaryOpNode>(NOT, primary());
+        if (cur().type == NUMBER) {
+            double v = stod(cur().text); 
+            next(); 
+            return Value::Number(v);
         }
 
-        if (current().type == MINUS) {
-            advance();
-            return make_shared<UnaryOpNode>(MINUS, primary());
+        if (cur().type == STRING) {
+            string v = cur().text; 
+            next(); 
+            return Value::String(v);
         }
 
-        if (current().type == IDENT) {
-            string name = current().text;
-            advance();
+        if (cur().type == BOOL) {
+            bool v = (cur().text == "1"); 
+            next(); 
+            return Value::Bool(v);
+        }
 
-            // Array index access
-            if (current().type == LBRACKET) {
-                advance();
-                auto index = expression();
-                expect(RBRACKET, "Expected ']'");
-                return make_shared<IndexAccessNode>(name, index);
+        if (cur().type == LBRACKET) {
+            next();
+            vector<Value> arr;
+            while (cur().type != RBRACKET && cur().type != END) {
+                arr.push_back(logicalOr());
+                if (cur().type == COMMA) next();
             }
+            if (cur().type != RBRACKET) error("Expected ']'", cur().line);
+            next();
+            return Value::Array(arr);
+        }
 
-            // Function call
-            if (current().type == LPAREN) {
-                advance();
-                vector<shared_ptr<ASTNode>> args;
-                while (current().type != RPAREN) {
-                    args.push_back(expression());
-                    if (current().type == COMMA) advance();
+        if (cur().type == IDENT) {
+            string n = cur().text;
+            next();
+
+            if (cur().type == LPAREN) {
+                next();
+                vector<Value> args;
+                while (cur().type != RPAREN && cur().type != END) {
+                    args.push_back(logicalOr());
+                    if (cur().type == COMMA) next();
                 }
-                expect(RPAREN, "Expected ')'");
-                return make_shared<CallNode>(name, args);
+                if (cur().type != RPAREN) error("Expected ')'", cur().line);
+                next();
+                return callFunction(n, args);
             }
 
-            // Method call
-            if (current().type == DOT) {
-                advance();
-                string method = current().text;
-                expect(IDENT, "Expected method name");
-                expect(LPAREN, "Expected '('");
-                vector<shared_ptr<ASTNode>> args;
-                while (current().type != RPAREN) {
-                    args.push_back(expression());
-                    if (current().type == COMMA) advance();
+            if (cur().type == LBRACKET) {
+                next();
+                Value idx = logicalOr();
+                if (cur().type != RBRACKET) error("Expected ']'", cur().line);
+                next();
+                
+                Value arr = getVar(n);
+                if (arr.type != Value::ARR) error("Not an array: " + n, cur().line);
+                int i = (int)idx.toNumber();
+                if (i < 0 || i >= (int)arr.arr.size()) 
+                    error("Array index out of bounds: " + to_string(i), cur().line);
+                return arr.arr[i];
+            }
+
+            return getVar(n);
+        }
+
+        error("Unexpected token: " + cur().text, cur().line);
+        return Value::Number(0);
+    }
+
+    Value term() {
+        Value v = factor();
+        while (cur().type == MUL || cur().type == DIV || cur().type == MOD) {
+            TokenType op = cur().type;
+            int line = cur().line;
+            next();
+            Value r = factor();
+            
+            if (op == MUL) {
+                v.num = v.toNumber() * r.toNumber();
+                v.type = Value::NUM;
+            }
+            else if (op == DIV) {
+                double divisor = r.toNumber();
+                if (divisor == 0) error("Division by zero", line);
+                v.num = v.toNumber() / divisor;
+                v.type = Value::NUM;
+            }
+            else {
+                int divisor = (int)r.toNumber();
+                if (divisor == 0) error("Modulo by zero", line);
+                v.num = (int)v.toNumber() % divisor;
+                v.type = Value::NUM;
+            }
+        }
+        return v;
+    }
+
+    Value expr() {
+        Value v = term();
+        while (cur().type == PLUS || cur().type == MINUS) {
+            TokenType op = cur().type;
+            next();
+            Value r = term();
+            
+            if (op == PLUS) {
+                if (v.type == Value::STR || r.type == Value::STR) {
+                    v = Value::String(v.toString() + r.toString());
+                } else {
+                    v.num = v.toNumber() + r.toNumber();
+                    v.type = Value::NUM;
                 }
-                expect(RPAREN, "Expected ')'");
-                return make_shared<MethodCallNode>(name, method, args);
+            } else {
+                v.num = v.toNumber() - r.toNumber();
+                v.type = Value::NUM;
             }
-
-            return make_shared<VarNode>(name);
         }
-
-        error("Unexpected token: " + current().text, current().line);
-        return nullptr;
+        return v;
     }
 
-    shared_ptr<ASTNode> term() {
-        auto node = primary();
-
-        while (current().type == MUL || current().type == DIV || current().type == MOD) {
-            TokenType op = current().type;
-            advance();
-            node = make_shared<BinOpNode>(op, node, primary());
-        }
-
-        return node;
-    }
-
-    shared_ptr<ASTNode> arithmetic() {
-        auto node = term();
-
-        while (current().type == PLUS || current().type == MINUS) {
-            TokenType op = current().type;
-            advance();
-            node = make_shared<BinOpNode>(op, node, term());
-        }
-
-        return node;
-    }
-
-    shared_ptr<ASTNode> comparison() {
-        auto node = arithmetic();
-
-        while (current().type == EQ || current().type == NEQ || 
-               current().type == LT || current().type == GT ||
-               current().type == LTE || current().type == GTE) {
-            TokenType op = current().type;
-            advance();
-            node = make_shared<BinOpNode>(op, node, arithmetic());
-        }
-
-        return node;
-    }
-
-    shared_ptr<ASTNode> logical() {
-        auto node = comparison();
-
-        while (current().type == AND || current().type == OR) {
-            TokenType op = current().type;
-            advance();
-            node = make_shared<BinOpNode>(op, node, comparison());
-        }
-
-        return node;
-    }
-
-    shared_ptr<ASTNode> expression() {
-        return logical();
-    }
-
-    shared_ptr<ASTNode> statement() {
-        // Print statement
-        if (match(PRINT)) {
-            return make_shared<PrintNode>(expression());
-        }
-
-        // Input statement
-        if (match(INPUT)) {
-            string name = current().text;
-            expect(IDENT, "Expected variable name");
-            return make_shared<InputNode>(name);
-        }
-
-        // Return statement
-        if (match(RETURN)) {
-            if (current().type == RBRACE || current().type == END) {
-                return make_shared<ReturnNode>(nullptr);
-            }
-            return make_shared<ReturnNode>(expression());
-        }
-
-        // Break statement
-        if (match(BREAK)) {
-            return make_shared<BreakNode>();
-        }
-
-        // Continue statement
-        if (match(CONTINUE)) {
-            return make_shared<ContinueNode>();
-        }
-
-        // If statement
-        if (match(IF)) {
-            auto cond = expression();
-            expect(LBRACE, "Expected '{'");
-            auto thenBlock = block();
-            shared_ptr<ASTNode> elseBlock = nullptr;
+    Value comparison() {
+        Value v = expr();
+        
+        while (cur().type == EQ || cur().type == NEQ || 
+               cur().type == LT || cur().type == GT || 
+               cur().type == LTE || cur().type == GTE) {
+            TokenType op = cur().type;
+            next();
+            Value r = expr();
             
-            if (match(ELSE)) {
-                expect(LBRACE, "Expected '{'");
-                elseBlock = block();
+            bool result;
+            if (op == EQ) {
+                result = v.equals(r);
+            }
+            else if (op == NEQ) {
+                result = !v.equals(r);
+            }
+            else {
+                double lhs = v.toNumber();
+                double rhs = r.toNumber();
+                if (op == LT) result = (lhs < rhs);
+                else if (op == GT) result = (lhs > rhs);
+                else if (op == LTE) result = (lhs <= rhs);
+                else result = (lhs >= rhs);
             }
             
-            return make_shared<IfNode>(cond, thenBlock, elseBlock);
+            v = Value::Bool(result);
+        }
+        return v;
+    }
+
+    Value logicalAnd() {
+        Value v = comparison();
+        while (cur().type == AND) {
+            next();
+            if (!v.toBool()) {
+                // Short-circuit: skip evaluation of right side
+                comparison();
+                return Value::Bool(false);
+            }
+            Value r = comparison();
+            v = Value::Bool(r.toBool());
+        }
+        return v;
+    }
+
+    Value logicalOr() {
+        Value v = logicalAnd();
+        while (cur().type == OR) {
+            next();
+            if (v.toBool()) {
+                // Short-circuit: skip evaluation of right side
+                logicalAnd();
+                return Value::Bool(true);
+            }
+            Value r = logicalAnd();
+            v = Value::Bool(r.toBool());
+        }
+        return v;
+    }
+
+    void skipBlock() {
+        if (cur().type == LBRACE) next();
+        
+        int depth = 1;
+        while (depth > 0 && cur().type != END) {
+            if (cur().type == LBRACE) depth++;
+            if (cur().type == RBRACE) depth--;
+            next();
+        }
+    }
+
+    Value callFunction(const string &name, const vector<Value> &args) {
+        if (!functions.count(name)) 
+            error("Undefined function: " + name, cur().line);
+        
+        if (recursionDepth >= MAX_RECURSION)
+            error("Maximum recursion depth exceeded", cur().line);
+        
+        Function &func = functions[name];
+        if (args.size() != func.params.size()) 
+            error("Function " + name + " expects " + to_string(func.params.size()) + 
+                  " arguments, got " + to_string(args.size()), cur().line);
+        
+        size_t savedPos = p;
+        ControlFlow savedFlow = flow;
+        recursionDepth++;
+        
+        pushScope();
+        for (size_t i = 0; i < args.size(); i++) {
+            setVar(func.params[i], args[i]);
+        }
+        
+        p = func.bodyStart;
+        flow = NONE;
+        returnValue = Value::Number(0);
+        
+        executeBlock();
+        
+        Value result = returnValue;
+        
+        popScope();
+        recursionDepth--;
+        p = savedPos;
+        flow = savedFlow;
+        
+        return result;
+    }
+
+    void executeBlock() {
+        if (cur().type != LBRACE) error("Expected '{'", cur().line);
+        next();
+        
+        while (cur().type != RBRACE && cur().type != END && flow == NONE) {
+            statement();
+        }
+        
+        if (cur().type == RBRACE) next();
+    }
+
+    void statement() {
+        if (cur().type == PRINT) {
+            next();
+            Value v = logicalOr();
+            cout << v.toString() << endl;
+            return;
         }
 
-        // While loop
-        if (match(WHILE)) {
-            auto cond = expression();
-            expect(LBRACE, "Expected '{'");
-            auto body = block();
-            return make_shared<WhileNode>(cond, body, false);
+        if (cur().type == INPUT) {
+            next();
+            if (cur().type != IDENT) error("Expected variable name after 'in'", cur().line);
+            string varName = cur().text;
+            next();
+            
+            string input;
+            if (!getline(cin, input)) {
+                error("Failed to read input", cur().line);
+            }
+            
+            try {
+                size_t pos;
+                double num = stod(input, &pos);
+                if (pos == input.length()) {
+                    setVar(varName, Value::Number(num));
+                } else {
+                    setVar(varName, Value::String(input));
+                }
+            } catch (...) {
+                setVar(varName, Value::String(input));
+            }
+            return;
         }
 
-        // Until loop
-        if (match(UNTIL)) {
-            auto cond = expression();
-            expect(LBRACE, "Expected '{'");
-            auto body = block();
-            return make_shared<WhileNode>(cond, body, true);
+        if (cur().type == IF) {
+            next();
+            Value cond = logicalOr();
+            
+            if (cond.toBool()) {
+                executeBlock();
+                if (cur().type == ELSE) {
+                    next();
+                    skipBlock();
+                }
+            } else {
+                skipBlock();
+                if (cur().type == ELSE) {
+                    next();
+                    executeBlock();
+                }
+            }
+            return;
         }
 
-        // For loop
-        if (match(FOR)) {
-            string var = current().text;
-            expect(IDENT, "Expected variable name");
-            expect(ASSIGN, "Expected '='");
-            auto start = expression();
-            expect(TO, "Expected 'to'");
-            auto end = expression();
-            expect(LBRACE, "Expected '{'");
-            auto body = block();
-            return make_shared<ForNode>(var, start, end, body);
+        if (cur().type == FOR) {
+            next();
+            if (cur().type != IDENT) error("Expected variable name after 'repeat'", cur().line);
+            string varName = cur().text;
+            next();
+            
+            if (cur().type != ASSIGN) error("Expected '=' in for loop", cur().line);
+            next();
+            Value start = logicalOr();
+            
+            if (cur().type != TO) error("Expected 'to' in for loop", cur().line);
+            next();
+            Value end = logicalOr();
+            
+            size_t loopStart = p;
+            int startVal = (int)start.toNumber();
+            int endVal = (int)end.toNumber();
+            
+            for (int i = startVal; i <= endVal; i++) {
+                setVar(varName, Value::Number(i));
+                p = loopStart;
+                executeBlock();
+                
+                if (flow == BREAK_FLAG) {
+                    flow = NONE;
+                    break;
+                }
+                if (flow == CONTINUE_FLAG) {
+                    flow = NONE;
+                    continue;
+                }
+                if (flow == RETURN_FLAG) break;
+            }
+            return;
         }
 
-        // Function definition
-        if (match(FUNC)) {
-            string name = current().text;
-            expect(IDENT, "Expected function name");
-            expect(LPAREN, "Expected '('");
+        // Until loop (while loop)
+        if (cur().type == UNTIL) {
+            next();
+            size_t condStart = p;
+            size_t blockStart = 0;
+            
+            // First, evaluate condition to find where block starts
+            Value cond = logicalOr();
+            blockStart = p;
+            
+            while (true) {
+                // Re-evaluate condition
+                p = condStart;
+                cond = logicalOr();
+                
+                if (!cond.toBool()) {
+                    // Skip the block and exit
+                    p = blockStart;
+                    skipBlock();
+                    break;
+                }
+                
+                // Reset to block start and execute
+                p = blockStart;
+                executeBlock();
+                
+                if (flow == BREAK_FLAG) {
+                    flow = NONE;
+                    break;
+                }
+                if (flow == CONTINUE_FLAG) {
+                    flow = NONE;
+                    continue;
+                }
+                if (flow == RETURN_FLAG) break;
+            }
+            return;
+        }
+
+        if (cur().type == BREAK) {
+            flow = BREAK_FLAG;
+            next();
+            return;
+        }
+
+        if (cur().type == CONTINUE) {
+            flow = CONTINUE_FLAG;
+            next();
+            return;
+        }
+
+        if (cur().type == RETURN) {
+            next();
+            if (cur().type != RBRACE && cur().type != END) {
+                returnValue = logicalOr();
+            }
+            flow = RETURN_FLAG;
+            return;
+        }
+
+        if (cur().type == FUNC) {
+            next();
+            if (cur().type != IDENT) error("Expected function name", cur().line);
+            string funcName = cur().text;
+            next();
+            
+            if (cur().type != LPAREN) error("Expected '(' after function name", cur().line);
+            next();
             
             vector<string> params;
-            while (current().type != RPAREN) {
-                params.push_back(current().text);
-                expect(IDENT, "Expected parameter name");
-                if (current().type == COMMA) advance();
+            while (cur().type != RPAREN && cur().type != END) {
+                if (cur().type != IDENT) error("Expected parameter name", cur().line);
+                params.push_back(cur().text);
+                next();
+                if (cur().type == COMMA) next();
             }
-            expect(RPAREN, "Expected ')'");
-            expect(LBRACE, "Expected '{'");
-            auto body = block();
             
-            return make_shared<FuncDefNode>(name, params, body);
+            if (cur().type != RPAREN) error("Expected ')'", cur().line);
+            next();
+            
+            Function func;
+            func.params = params;
+            func.bodyStart = p;
+            functions[funcName] = func;
+            
+            skipBlock();
+            return;
         }
 
-        // Assignment or expression statement
-        if (current().type == IDENT) {
-            string name = current().text;
-            advance();
-
-            // Array index assignment
-            if (current().type == LBRACKET) {
-                advance();
-                auto index = expression();
-                expect(RBRACKET, "Expected ']'");
-                expect(ASSIGN, "Expected '='");
-                auto value = expression();
-                return make_shared<IndexAssignNode>(name, index, value);
+        if (cur().type == IDENT) {
+            string varName = cur().text;
+            next();
+            
+            if (cur().type == INC) {
+                next();
+                Value v = getVar(varName);
+                setVar(varName, Value::Number(v.toNumber() + 1));
+                return;
             }
-
-            if (match(ASSIGN)) {
-                auto value = expression();
-                return make_shared<AssignNode>(name, value);
-            } else if (match(INC)) {
-                return make_shared<AssignNode>(name, 
-                    make_shared<BinOpNode>(PLUS, make_shared<VarNode>(name), make_shared<NumberNode>(1)));
-            } else if (match(DEC)) {
-                return make_shared<AssignNode>(name, 
-                    make_shared<BinOpNode>(MINUS, make_shared<VarNode>(name), make_shared<NumberNode>(1)));
-            } else {
-                pos--; // Backtrack
-                return expression();
+            
+            if (cur().type == DEC) {
+                next();
+                Value v = getVar(varName);
+                setVar(varName, Value::Number(v.toNumber() - 1));
+                return;
             }
+            
+            if (cur().type == LBRACKET) {
+                next();
+                Value idx = logicalOr();
+                if (cur().type != RBRACKET) error("Expected ']'", cur().line);
+                next();
+                
+                if (cur().type != ASSIGN) error("Expected '='", cur().line);
+                next();
+                
+                Value newVal = logicalOr();
+                Value arr = getVar(varName);
+                
+                if (arr.type != Value::ARR) error("Not an array: " + varName, cur().line);
+                int i = (int)idx.toNumber();
+                if (i < 0 || i >= (int)arr.arr.size()) 
+                    error("Array index out of bounds: " + to_string(i), cur().line);
+                
+                arr.arr[i] = newVal;
+                setVar(varName, arr);
+                return;
+            }
+            
+            if (cur().type != ASSIGN) error("Expected '=' after " + varName, cur().line);
+            next();
+            Value v = logicalOr();
+            setVar(varName, v);
+            return;
         }
 
-        error("Unexpected token in statement: " + current().text, current().line);
-        return nullptr;
-    }
-
-    shared_ptr<ASTNode> block() {
-        vector<shared_ptr<ASTNode>> statements;
-        
-        while (current().type != RBRACE && current().type != END) {
-            statements.push_back(statement());
+        if (cur().type != END && cur().type != RBRACE) {
+            error("Unexpected token: " + cur().text, cur().line);
         }
-        
-        expect(RBRACE, "Expected '}'");
-        return make_shared<BlockNode>(statements);
     }
 
 public:
-    Parser(vector<Token> t) : tokens(t) {}
-
-    vector<shared_ptr<ASTNode>> parse() {
-        vector<shared_ptr<ASTNode>> statements;
-        
-        while (current().type != END) {
-            statements.push_back(statement());
-        }
-        
-        return statements;
-    }
-};
-
-// ===================== INTERPRETER =====================
-struct ReturnValue : exception {
-    Value value;
-    ReturnValue(Value v) : value(v) {}
-};
-
-struct BreakSignal : exception {};
-struct ContinueSignal : exception {};
-
-struct UserFunction {
-    vector<string> params;
-    shared_ptr<ASTNode> body;
-};
-
-class Interpreter {
-    vector<unordered_map<string, Value>> scopes;
-    unordered_map<string, UserFunction> functions;
-    unordered_map<string, function<Value(vector<Value>&)>> nativeFuncs;
-
-    void pushScope() {
+    EZ(vector<Token> tokens) : t(tokens) {
         scopes.push_back({});
     }
 
-    void popScope() {
-        if (!scopes.empty()) scopes.pop_back();
-    }
-
-    void setVar(const string& name, Value val) {
-        if (!scopes.empty()) {
-            scopes.back()[name] = val;
-        }
-    }
-
-    Value getVar(const string& name) {
-        for (int i = scopes.size() - 1; i >= 0; i--) {
-            if (scopes[i].count(name)) {
-                return scopes[i][name];
+    void run() {
+        try {
+            while (cur().type != END && flow == NONE) {
+                statement();
             }
-        }
-        return Value::None();
-    }
-
-    Value eval(shared_ptr<ASTNode> node) {
-        if (!node) return Value::None();
-
-        if (auto n = dynamic_cast<NumberNode*>(node.get())) {
-            return Value::Number(n->value);
-        }
-
-        if (auto n = dynamic_cast<StringNode*>(node.get())) {
-            return Value::String(n->value);
-        }
-
-        if (auto n = dynamic_cast<BoolNode*>(node.get())) {
-            return Value::Bool(n->value);
-        }
-
-        if (auto n = dynamic_cast<VarNode*>(node.get())) {
-            return getVar(n->name);
-        }
-
-        if (auto n = dynamic_cast<BinOpNode*>(node.get())) {
-            Value left = eval(n->left);
-            Value right = eval(n->right);
-
-            switch (n->op) {
-                case PLUS:
-                    if (left.type == Value::STR || right.type == Value::STR) {
-                        return Value::String(left.toString() + right.toString());
-                    }
-                    return Value::Number(left.toNumber() + right.toNumber());
-                case MINUS: return Value::Number(left.toNumber() - right.toNumber());
-                case MUL: return Value::Number(left.toNumber() * right.toNumber());
-                case DIV: 
-                    if (right.toNumber() == 0) error("Division by zero", 0);
-                    return Value::Number(left.toNumber() / right.toNumber());
-                case MOD: return Value::Number(fmod(left.toNumber(), right.toNumber()));
-                case EQ: 
-                    if (left.type == Value::STR && right.type == Value::STR) {
-                        return Value::Bool(left.str == right.str);
-                    }
-                    return Value::Bool(left.toNumber() == right.toNumber());
-                case NEQ:
-                    if (left.type == Value::STR && right.type == Value::STR) {
-                        return Value::Bool(left.str != right.str);
-                    }
-                    return Value::Bool(left.toNumber() != right.toNumber());
-                case LT: return Value::Bool(left.toNumber() < right.toNumber());
-                case GT: return Value::Bool(left.toNumber() > right.toNumber());
-                case LTE: return Value::Bool(left.toNumber() <= right.toNumber());
-                case GTE: return Value::Bool(left.toNumber() >= right.toNumber());
-                case AND: return Value::Bool(left.toBool() && right.toBool());
-                case OR: return Value::Bool(left.toBool() || right.toBool());
-                default: return Value::None();
-            }
-        }
-
-        if (auto n = dynamic_cast<UnaryOpNode*>(node.get())) {
-            Value operand = eval(n->operand);
-            if (n->op == NOT) return Value::Bool(!operand.toBool());
-            if (n->op == MINUS) return Value::Number(-operand.toNumber());
-        }
-
-        if (auto n = dynamic_cast<AssignNode*>(node.get())) {
-            Value val = eval(n->value);
-            setVar(n->name, val);
-            return val;
-        }
-
-        if (auto n = dynamic_cast<CallNode*>(node.get())) {
-            vector<Value> args;
-            for (auto& arg : n->args) {
-                args.push_back(eval(arg));
-            }
-
-            // Check native functions
-            if (nativeFuncs.count(n->name)) {
-                return nativeFuncs[n->name](args);
-            }
-
-            // Check user functions
-            if (functions.count(n->name)) {
-                auto& func = functions[n->name];
-                pushScope();
-                
-                for (size_t i = 0; i < func.params.size() && i < args.size(); i++) {
-                    setVar(func.params[i], args[i]);
-                }
-
-                try {
-                    eval(func.body);
-                } catch (ReturnValue& ret) {
-                    popScope();
-                    return ret.value;
-                }
-
-                popScope();
-                return Value::None();
-            }
-
-            error("Unknown function: " + n->name, 0);
-        }
-
-        if (auto n = dynamic_cast<MethodCallNode*>(node.get())) {
-            Value obj = getVar(n->objName);
-            vector<Value> args;
-            for (auto& arg : n->args) {
-                args.push_back(eval(arg));
-            }
-
-            // String methods
-            if (n->method == "length" && obj.type == Value::STR) {
-                return Value::Number(obj.str.length());
-            }
-            if (n->method == "upper" && obj.type == Value::STR) {
-                string s = obj.str;
-                for (auto& c : s) c = toupper(c);
-                return Value::String(s);
-            }
-            if (n->method == "lower" && obj.type == Value::STR) {
-                string s = obj.str;
-                for (auto& c : s) c = tolower(c);
-                return Value::String(s);
-            }
-
-            // Array methods
-            if (obj.type == Value::ARRAY) {
-                if (n->method == "push") {
-                    for (auto& arg : args) {
-                        obj.array->push_back(arg);
-                    }
-                    return Value::None();
-                }
-                if (n->method == "pop") {
-                    if (!obj.array->empty()) {
-                        Value last = obj.array->back();
-                        obj.array->pop_back();
-                        return last;
-                    }
-                    return Value::None();
-                }
-                if (n->method == "length" || n->method == "size") {
-                    return Value::Number(obj.array->size());
-                }
-                if (n->method == "clear") {
-                    obj.array->clear();
-                    return Value::None();
-                }
-                if (n->method == "get" && !args.empty()) {
-                    int idx = (int)args[0].toNumber();
-                    if (idx >= 0 && idx < (int)obj.array->size()) {
-                        return (*obj.array)[idx];
-                    }
-                    return Value::None();
-                }
-            }
-
-            // File methods
-            if (obj.type == Value::FILE) {
-                if (n->method == "add" || n->method == "write") {
-                    if (obj.fileHandle && obj.fileHandle->is_open()) {
-                        for (auto& arg : args) {
-                            (*obj.fileHandle) << arg.toString();
-                        }
-                        obj.fileHandle->flush();
-                    }
-                    return Value::None();
-                }
-                if (n->method == "readLine") {
-                    if (obj.fileHandle && obj.fileHandle->is_open()) {
-                        string line;
-                        if (getline(*obj.fileHandle, line)) {
-                            return Value::String(line);
-                        }
-                    }
-                    return Value::None();
-                }
-                if (n->method == "readAll") {
-                    if (obj.fileHandle && obj.fileHandle->is_open()) {
-                        stringstream ss;
-                        ss << obj.fileHandle->rdbuf();
-                        return Value::String(ss.str());
-                    }
-                    return Value::None();
-                }
-                if (n->method == "close") {
-                    if (obj.fileHandle && obj.fileHandle->is_open()) {
-                        obj.fileHandle->close();
-                    }
-                    return Value::None();
-                }
-            }
-
-            error("Unknown method: " + n->method, 0);
-        }
-
-        if (auto n = dynamic_cast<ArrayLiteralNode*>(node.get())) {
-            vector<Value> elements;
-            for (auto& elem : n->elements) {
-                elements.push_back(eval(elem));
-            }
-            return Value::Array(elements);
-        }
-
-        if (auto n = dynamic_cast<IndexAccessNode*>(node.get())) {
-            Value arr = getVar(n->arrayName);
-            if (arr.type != Value::ARRAY) {
-                error("Cannot index non-array type", 0);
-            }
-            
-            int idx = (int)eval(n->index).toNumber();
-            if (idx < 0 || idx >= (int)arr.array->size()) {
-                error("Array index out of bounds: " + to_string(idx), 0);
-            }
-            
-            return (*arr.array)[idx];
-        }
-
-        if (auto n = dynamic_cast<IndexAssignNode*>(node.get())) {
-            Value arr = getVar(n->arrayName);
-            if (arr.type != Value::ARRAY) {
-                error("Cannot index non-array type", 0);
-            }
-            
-            int idx = (int)eval(n->index).toNumber();
-            if (idx < 0 || idx >= (int)arr.array->size()) {
-                error("Array index out of bounds: " + to_string(idx), 0);
-            }
-            
-            Value val = eval(n->value);
-            (*arr.array)[idx] = val;
-            return val;
-        }
-
-        if (auto n = dynamic_cast<BlockNode*>(node.get())) {
-            Value last = Value::None();
-            for (auto& stmt : n->statements) {
-                last = eval(stmt);
-            }
-            return last;
-        }
-
-        if (auto n = dynamic_cast<IfNode*>(node.get())) {
-            Value cond = eval(n->condition);
-            if (cond.toBool()) {
-                return eval(n->thenBlock);
-            } else if (n->elseBlock) {
-                return eval(n->elseBlock);
-            }
-            return Value::None();
-        }
-
-        if (auto n = dynamic_cast<WhileNode*>(node.get())) {
-            while (true) {
-                Value cond = eval(n->condition);
-                bool shouldRun = n->isUntil ? !cond.toBool() : cond.toBool();
-                
-                if (!shouldRun) break;
-
-                try {
-                    eval(n->body);
-                } catch (BreakSignal&) {
-                    break;
-                } catch (ContinueSignal&) {
-                    continue;
-                }
-            }
-            return Value::None();
-        }
-
-        if (auto n = dynamic_cast<ForNode*>(node.get())) {
-            Value start = eval(n->start);
-            Value end = eval(n->end);
-            
-            for (double i = start.toNumber(); i <= end.toNumber(); i++) {
-                setVar(n->var, Value::Number(i));
-                
-                try {
-                    eval(n->body);
-                } catch (BreakSignal&) {
-                    break;
-                } catch (ContinueSignal&) {
-                    continue;
-                }
-            }
-            return Value::None();
-        }
-
-        if (auto n = dynamic_cast<FuncDefNode*>(node.get())) {
-            functions[n->name] = { n->params, n->body };
-            return Value::None();
-        }
-
-        if (auto n = dynamic_cast<ReturnNode*>(node.get())) {
-            Value val = n->value ? eval(n->value) : Value::None();
-            throw ReturnValue(val);
-        }
-
-        if (auto n = dynamic_cast<PrintNode*>(node.get())) {
-            cout << eval(n->value).toString() << endl;
-            return Value::None();
-        }
-
-        if (auto n = dynamic_cast<InputNode*>(node.get())) {
-            string input;
-            getline(cin, input);
-            setVar(n->varName, Value::String(input));
-            return Value::None();
-        }
-
-        if (dynamic_cast<BreakNode*>(node.get())) {
-            throw BreakSignal();
-        }
-
-        if (dynamic_cast<ContinueNode*>(node.get())) {
-            throw ContinueSignal();
-        }
-
-        return Value::None();
-    }
-
-public:
-    Interpreter() {
-        pushScope(); // Global scope
-
-        // ==================== FILE I/O ====================
-        nativeFuncs["read"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            ifstream f(args[0].toString());
-            if (!f) return Value::String("");
-            stringstream ss;
-            ss << f.rdbuf();
-            return Value::String(ss.str());
-        };
-
-        nativeFuncs["write"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::None();
-            auto handle = make_shared<fstream>(args[0].toString(), ios::out | ios::trunc);
-            if (handle->is_open()) {
-                (*handle) << args[1].toString();
-            }
-            return Value::File(args[0].toString(), handle);
-        };
-
-        nativeFuncs["append"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::None();
-            auto handle = make_shared<fstream>(args[0].toString(), ios::out | ios::app);
-            if (handle->is_open()) {
-                (*handle) << args[1].toString();
-            }
-            return Value::File(args[0].toString(), handle);
-        };
-
-        nativeFuncs["open"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::None();
-            string mode = args.size() > 1 ? args[1].toString() : "r";
-            auto handle = make_shared<fstream>();
-            
-            if (mode == "r") {
-                handle->open(args[0].toString(), ios::in);
-            } else if (mode == "w") {
-                handle->open(args[0].toString(), ios::out | ios::trunc);
-            } else if (mode == "a") {
-                handle->open(args[0].toString(), ios::out | ios::app);
-            } else if (mode == "rw") {
-                handle->open(args[0].toString(), ios::in | ios::out);
-            }
-            
-            return Value::File(args[0].toString(), handle);
-        };
-
-        nativeFuncs["exists"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Bool(false);
-            struct stat buffer;
-            return Value::Bool(stat(args[0].toString().c_str(), &buffer) == 0);
-        };
-
-        // ==================== MATH ====================
-        nativeFuncs["abs"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(abs(args[0].toNumber()));
-        };
-
-        nativeFuncs["sqrt"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(sqrt(args[0].toNumber()));
-        };
-
-        nativeFuncs["pow"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::Number(0);
-            return Value::Number(pow(args[0].toNumber(), args[1].toNumber()));
-        };
-
-        nativeFuncs["floor"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(floor(args[0].toNumber()));
-        };
-
-        nativeFuncs["ceil"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(ceil(args[0].toNumber()));
-        };
-
-        nativeFuncs["round"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(round(args[0].toNumber()));
-        };
-
-        nativeFuncs["random"] = [](vector<Value>& args) {
-            static random_device rd;
-            static mt19937 gen(rd());
-            
-            if (args.empty()) {
-                uniform_real_distribution<> dis(0.0, 1.0);
-                return Value::Number(dis(gen));
-            }
-            
-            int min = 0, max = 100;
-            if (args.size() == 1) {
-                max = (int)args[0].toNumber();
-            } else if (args.size() >= 2) {
-                min = (int)args[0].toNumber();
-                max = (int)args[1].toNumber();
-            }
-            
-            uniform_int_distribution<> dis(min, max);
-            return Value::Number(dis(gen));
-        };
-
-        nativeFuncs["min"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            double minVal = args[0].toNumber();
-            for (auto& arg : args) {
-                minVal = std::min(minVal, arg.toNumber());
-            }
-            return Value::Number(minVal);
-        };
-
-        nativeFuncs["max"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            double maxVal = args[0].toNumber();
-            for (auto& arg : args) {
-                maxVal = std::max(maxVal, arg.toNumber());
-            }
-            return Value::Number(maxVal);
-        };
-
-        // ==================== STRING ====================
-        nativeFuncs["len"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            if (args[0].type == Value::ARRAY) {
-                return Value::Number(args[0].array->size());
-            }
-            if (args[0].type == Value::STR) {
-                return Value::Number(args[0].str.length());
-            }
-            return Value::Number(args[0].toString().length());
-        };
-
-        nativeFuncs["upper"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            string s = args[0].toString();
-            transform(s.begin(), s.end(), s.begin(), ::toupper);
-            return Value::String(s);
-        };
-
-        nativeFuncs["lower"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            string s = args[0].toString();
-            transform(s.begin(), s.end(), s.begin(), ::tolower);
-            return Value::String(s);
-        };
-
-        nativeFuncs["substr"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::String("");
-            string s = args[0].toString();
-            int start = (int)args[1].toNumber();
-            int length = args.size() > 2 ? (int)args[2].toNumber() : s.length() - start;
-            
-            if (start < 0 || start >= (int)s.length()) return Value::String("");
-            return Value::String(s.substr(start, length));
-        };
-
-        nativeFuncs["split"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Array();
-            string s = args[0].toString();
-            string delim = args.size() > 1 ? args[1].toString() : " ";
-            
-            vector<Value> result;
-            size_t start = 0, end = 0;
-            
-            while ((end = s.find(delim, start)) != string::npos) {
-                result.push_back(Value::String(s.substr(start, end - start)));
-                start = end + delim.length();
-            }
-            result.push_back(Value::String(s.substr(start)));
-            
-            return Value::Array(result);
-        };
-
-        nativeFuncs["replace"] = [](vector<Value>& args) {
-            if (args.size() < 3) return Value::String("");
-            string s = args[0].toString();
-            string oldStr = args[1].toString();
-            string newStr = args[2].toString();
-            
-            size_t pos = 0;
-            while ((pos = s.find(oldStr, pos)) != string::npos) {
-                s.replace(pos, oldStr.length(), newStr);
-                pos += newStr.length();
-            }
-            
-            return Value::String(s);
-        };
-
-        nativeFuncs["trim"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            string s = args[0].toString();
-            
-            size_t start = s.find_first_not_of(" \t\n\r");
-            size_t end = s.find_last_not_of(" \t\n\r");
-            
-            if (start == string::npos) return Value::String("");
-            return Value::String(s.substr(start, end - start + 1));
-        };
-
-        nativeFuncs["charAt"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::String("");
-            string s = args[0].toString();
-            int idx = (int)args[1].toNumber();
-            
-            if (idx < 0 || idx >= (int)s.length()) return Value::String("");
-            return Value::String(string(1, s[idx]));
-        };
-
-        // ==================== ARRAY ====================
-        nativeFuncs["push"] = [](vector<Value>& args) {
-            if (args.size() < 2) return Value::None();
-            if (args[0].type != Value::ARRAY) return Value::None();
-            
-            for (size_t i = 1; i < args.size(); i++) {
-                args[0].array->push_back(args[i]);
-            }
-            return Value::None();
-        };
-
-        nativeFuncs["pop"] = [](vector<Value>& args) {
-            if (args.empty() || args[0].type != Value::ARRAY) return Value::None();
-            if (args[0].array->empty()) return Value::None();
-            
-            Value last = args[0].array->back();
-            args[0].array->pop_back();
-            return last;
-        };
-
-        nativeFuncs["insert"] = [](vector<Value>& args) {
-            if (args.size() < 3 || args[0].type != Value::ARRAY) return Value::None();
-            
-            int idx = (int)args[1].toNumber();
-            if (idx < 0 || idx > (int)args[0].array->size()) return Value::None();
-            
-            args[0].array->insert(args[0].array->begin() + idx, args[2]);
-            return Value::None();
-        };
-
-        nativeFuncs["remove"] = [](vector<Value>& args) {
-            if (args.size() < 2 || args[0].type != Value::ARRAY) return Value::None();
-            
-            int idx = (int)args[1].toNumber();
-            if (idx < 0 || idx >= (int)args[0].array->size()) return Value::None();
-            
-            Value removed = (*args[0].array)[idx];
-            args[0].array->erase(args[0].array->begin() + idx);
-            return removed;
-        };
-
-        nativeFuncs["indexOf"] = [](vector<Value>& args) {
-            if (args.size() < 2 || args[0].type != Value::ARRAY) return Value::Number(-1);
-            
-            for (size_t i = 0; i < args[0].array->size(); i++) {
-                Value& elem = (*args[0].array)[i];
-                if (elem.type == args[1].type) {
-                    if (elem.type == Value::NUM && elem.num == args[1].num) return Value::Number(i);
-                    if (elem.type == Value::STR && elem.str == args[1].str) return Value::Number(i);
-                    if (elem.type == Value::BOOL && elem.boolean == args[1].boolean) return Value::Number(i);
-                }
-            }
-            
-            return Value::Number(-1);
-        };
-
-        nativeFuncs["join"] = [](vector<Value>& args) {
-            if (args.empty() || args[0].type != Value::ARRAY) return Value::String("");
-            string delim = args.size() > 1 ? args[1].toString() : ",";
-            
-            string result;
-            for (size_t i = 0; i < args[0].array->size(); i++) {
-                if (i > 0) result += delim;
-                result += (*args[0].array)[i].toString();
-            }
-            
-            return Value::String(result);
-        };
-
-        nativeFuncs["reverse"] = [](vector<Value>& args) {
-            if (args.empty() || args[0].type != Value::ARRAY) return Value::None();
-            reverse(args[0].array->begin(), args[0].array->end());
-            return Value::None();
-        };
-
-        nativeFuncs["sort"] = [](vector<Value>& args) {
-            if (args.empty() || args[0].type != Value::ARRAY) return Value::None();
-            
-            sort(args[0].array->begin(), args[0].array->end(), 
-                [](const Value& a, const Value& b) {
-                    return a.toNumber() < b.toNumber();
-                });
-            
-            return Value::None();
-        };
-
-        // ==================== TYPE CONVERSION ====================
-        nativeFuncs["num"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(args[0].toNumber());
-        };
-
-        nativeFuncs["toNumber"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Number(0);
-            return Value::Number(args[0].toNumber());
-        };
-
-        nativeFuncs["str"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            return Value::String(args[0].toString());
-        };
-
-        nativeFuncs["toString"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("");
-            return Value::String(args[0].toString());
-        };
-
-        nativeFuncs["toBool"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Bool(false);
-            return Value::Bool(args[0].toBool());
-        };
-
-        nativeFuncs["type"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::String("none");
-            
-            switch (args[0].type) {
-                case Value::NUM: return Value::String("num");
-                case Value::STR: return Value::String("str");
-                case Value::BOOL: return Value::String("bool");
-                case Value::ARRAY: return Value::String("array");
-                case Value::FILE: return Value::String("file");
-                case Value::FUNC_REF: return Value::String("function");
-                default: return Value::String("none");
-            }
-        };
-
-        // ==================== UTILITY ====================
-        nativeFuncs["sleep"] = [](vector<Value>& args) -> Value {
-            if (args.empty()) return Value::None();
-            int ms = (int)args[0].toNumber();
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-            return Value::None();
-        };
-
-        nativeFuncs["clock"] = [](vector<Value>& args) -> Value {
-            auto now = std::chrono::system_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            return Value::Number((double)ms);
-        };
-
-        // ==================== ARRAY CREATION ====================
-        nativeFuncs["array"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Array();
-            int size = (int)args[0].toNumber();
-            Value fillValue = args.size() > 1 ? args[1] : Value::Number(0);
-            vector<Value> arr(size, fillValue);
-            return Value::Array(arr);
-        };
-
-        nativeFuncs["range"] = [](vector<Value>& args) {
-            if (args.empty()) return Value::Array();
-            int start = 0, end = 0, step = 1;
-            
-            if (args.size() == 1) {
-                end = (int)args[0].toNumber();
-            } else if (args.size() == 2) {
-                start = (int)args[0].toNumber();
-                end = (int)args[1].toNumber();
-            } else if (args.size() >= 3) {
-                start = (int)args[0].toNumber();
-                end = (int)args[1].toNumber();
-                step = (int)args[2].toNumber();
-            }
-            
-            vector<Value> arr;
-            if (step > 0) {
-                for (int i = start; i < end; i += step) {
-                    arr.push_back(Value::Number(i));
-                }
-            } else if (step < 0) {
-                for (int i = start; i > end; i += step) {
-                    arr.push_back(Value::Number(i));
-                }
-            }
-            
-            return Value::Array(arr);
-        };
-    }
-
-    void run(vector<shared_ptr<ASTNode>> statements) {
-        for (auto& stmt : statements) {
-            eval(stmt);
+        } catch (const InterpreterException &e) {
+            cerr << e.what() << endl;
+            exit(1);
+        } catch (const exception &e) {
+            cerr << "Runtime error: " << e.what() << endl;
+            exit(1);
         }
     }
 };
 
 // ===================== MAIN =====================
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        cout << "EZ Interpreter v2.1\n";
+        cout << "Usage: ez file.ez\n\n";
+        cout << "Features:\n";
+        cout << "  - Variables and arrays\n";
+        cout << "  - Conditionals (when/other)\n";
+        cout << "  - For loops (repeat...to)\n";
+        cout << "  - While loops (until condition)\n";
+        cout << "  - Functions (task)\n";
+        cout << "  - Input/Output (in/out)\n";
+        cout << "  - Break/Continue (escape/skip)\n";
+        cout << "  - Increment/Decrement (i++, i--)\n";
+        cout << "  - String comparison and concatenation\n";
+        cout << "  - Short-circuit evaluation\n";
+        cout << "  - Escape sequences in strings\n";
+        return 0;
+    }
+
     try {
-        if (argc < 2) {
-            cout << "EZ Language Interpreter v3.0\n";
-            cout << "Usage: " << argv[0] << " <filename.ez>\n";
-            return 0;
-        }
-
-        ifstream file(argv[1]);
-        if (!file) {
-            cerr << "Error: Cannot open file '" << argv[1] << "'\n";
-            return 1;
-        }
-
-        stringstream buffer;
-        buffer << file.rdbuf();
-        string code = buffer.str();
-
+        string code = readFile(argv[1]);
         auto tokens = tokenize(code);
-        Parser parser(tokens);
-        auto ast = parser.parse();
-        
-        Interpreter interpreter;
-        interpreter.run(ast);
-
-    } catch (InterpreterException& e) {
-        cerr << e.what() << endl;
-        return 1;
-    } catch (exception& e) {
+        EZ ez(tokens);
+        ez.run();
+    } catch (const exception &e) {
         cerr << "Fatal error: " << e.what() << endl;
         return 1;
     }

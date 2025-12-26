@@ -1,6 +1,7 @@
 start=clock()
+num=0
 repeat i = 1 to 1000000 {
-    
+    num=i+1
 }
 end=clock()-start
 out end
