@@ -40,7 +40,7 @@ task cos(angle) {
             }
         }
     }
-    when x < -pi() {
+    when x < -1*pi() {
         repeat i = 0 to 10 {
             x = x + 2 * pi()
             when x >= -pi() {
@@ -341,9 +341,3 @@ task acos_simple(x) {
     give result
 }
 
-// Main example
-when __name__ == "__main__" {
-    // This runs when the file is executed directly
-    out "Math Library v1.0.0"
-    test()
-}
