@@ -1,6 +1,0 @@
-task add(x) {
-    give task(y) { give x + y }
-}
-
-f = add(5)
-out f(3)   // 8

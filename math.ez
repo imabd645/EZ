@@ -1,7 +1,7 @@
-# math.ez - Basic math functions library
-# Simple implementation of cosine using Taylor series approximation
+// math.ez - Basic math functions library
+// Simple implementation of cosine using Taylor series approximation
 
-# Constants
+// Constants
 task pi() {
     give 3.141592653589793
 }
@@ -14,7 +14,7 @@ task rad_to_deg(radians) {
     give radians * (180.0 / pi())
 }
 
-# Factorial helper function
+// Factorial helper function
 task factorial(n) {
     when n <= 1 {
         give 1
@@ -24,16 +24,16 @@ task factorial(n) {
     }
 }
 
-# Cosine function using Taylor series
-# cos(x) = 1 - x²/2! + x⁴/4! - x⁶/6! + ...
+// Cosine function using Taylor series
+// cos(x) = 1 - x²/2! + x⁴/4! - x⁶/6! + ...
 task cos(angle) {
-    # Convert degrees to radians if needed
-    # We'll assume input is in radians by default
+    // Convert degrees to radians if needed
+    // We'll assume input is in radians by default
     x = angle
     
-    # Normalize angle to [-π, π]
+    // Normalize angle to [-π, π]
     when x > pi() {
-        repeat i from 0 to 10 {
+        repeat i = 0 to 10 {
             x = x - 2 * pi()
             when x <= pi() {
                 escape
@@ -41,7 +41,7 @@ task cos(angle) {
         }
     }
     when x < -pi() {
-        repeat i from 0 to 10 {
+        repeat i = 0 to 10 {
             x = x + 2 * pi()
             when x >= -pi() {
                 escape
@@ -49,12 +49,12 @@ task cos(angle) {
         }
     }
     
-    # Taylor series approximation (6 terms for good accuracy)
+    // Taylor series approximation (6 terms for good accuracy)
     result = 1.0
     term = 1.0
     sign = -1.0
     
-    repeat n from 1 to 6 {
+    repeat n = 1 to 6 {
         exponent = 2 * n
         term = term * x * x / ((exponent - 1) * exponent)
         result = result + sign * term
@@ -64,13 +64,13 @@ task cos(angle) {
     give result
 }
 
-# Cosine with degrees input
+// Cosine with degrees input
 task cosd(degrees) {
     radians = deg_to_rad(degrees)
     give cos(radians)
 }
 
-# Sine function using identity sin(x) = cos(π/2 - x)
+// Sine function using identity sin(x) = cos(π/2 - x)
 task sin(angle) {
     give cos(pi() / 2 - angle)
 }
@@ -80,7 +80,7 @@ task sind(degrees) {
     give sin(radians)
 }
 
-# Tangent function
+// Tangent function
 task tan(angle) {
     cos_val = cos(angle)
     when abs(cos_val) < 0.0000001 {
@@ -94,7 +94,7 @@ task tand(degrees) {
     give tan(radians)
 }
 
-# Absolute value
+// Absolute value
 task abs(x) {
     when x < 0 {
         give -x
@@ -104,16 +104,16 @@ task abs(x) {
     }
 }
 
-# Power function
+// Power function
 task pow(base, exponent) {
     result = 1.0
-    repeat i from 1 to exponent {
+    repeat i = 1 to exponent {
         result = result * base
     }
     give result
 }
 
-# Square root using Babylonian method
+// Square root using Babylonian method
 task sqrt(x) {
     when x < 0 {
         error "Cannot take square root of negative number"
@@ -123,18 +123,18 @@ task sqrt(x) {
     }
     
     guess = x / 2.0
-    repeat i from 1 to 10 {
+    repeat i = 1 to 10 {
         guess = (guess + x / guess) / 2.0
     }
     give guess
 }
 
-# Exponential function e^x
+// Exponential function e^x
 task exp(x) {
     result = 1.0
     term = 1.0
     
-    repeat n from 1 to 10 {
+    repeat n = 1 to 10 {
         term = term * x / n
         result = result + term
     }
@@ -142,17 +142,17 @@ task exp(x) {
     give result
 }
 
-# Natural logarithm using Taylor series
+// Natural logarithm using Taylor series
 task ln(x) {
     when x <= 0 {
         error "ln() argument must be positive"
     }
     
-    # Use identity ln(x) = 2 * sum_{k=0}^∞ ((x-1)/(x+1))^{2k+1} / (2k+1)
+    // Use identity ln(x) = 2 * sum_{k=0}^∞ ((x-1)/(x+1))^{2k+1} / (2k+1)
     y = (x - 1) / (x + 1)
     result = 0.0
     
-    repeat k from 0 to 10 {
+    repeat k = 0 to 10 {
         power = 2 * k + 1
         term = pow(y, power) / power
         result = result + term
@@ -161,42 +161,42 @@ task ln(x) {
     give 2 * result
 }
 
-# Test function to demonstrate usage
+// Test function to demonstrate usage
 task test() {
     out "Math Library Test"
     out "================="
     
-    # Test pi constant
+    // Test pi constant
     out "π = " + pi()
     
-    # Test cosine
+    // Test cosine
     angles = [0, 30, 45, 60, 90, 180]
     get angle in angles {
         out "cos(" + angle + "°) = " + cosd(angle)
     }
     
     out ""
-    # Test in radians
+    // Test in radians
     rad_angles = [0, pi()/6, pi()/4, pi()/3, pi()/2, pi()]
     get angle in rad_angles {
         out "cos(" + angle + " rad) = " + cos(angle)
     }
     
-    # Test conversion
+    // Test conversion
     out ""
-    out "Degrees to radians: 180° = " + deg_to_rad(180) + " rad"
-    out "Radians to degrees: π rad = " + rad_to_deg(pi()) + "°"
+    out "Degrees to radians= 180° = " + deg_to_rad(180) + " rad"
+    out "Radians to degrees= π rad = " + rad_to_deg(pi()) + "°"
     
     give "Test completed"
 }
 
-# Vector operations
+// Vector operations
 task vec2(x, y) {
-    give {x: x, y: y}
+    give {x= x, y= y}
 }
 
 task vec3(x, y, z) {
-    give {x: x, y: y, z: z}
+    give {x= x, y= y, z= z}
 }
 
 task vec_length(vec) {
@@ -215,10 +215,10 @@ task vec_normalize(vec) {
     }
     other {
         when "z" in vec {
-            give {x: vec.x / len, y: vec.y / len, z: vec.z / len}
+            give {x= vec.x / len, y= vec.y / len, z= vec.z / len}
         }
         other {
-            give {x: vec.x / len, y: vec.y / len}
+            give {x= vec.x / len, y= vec.y / len}
         }
     }
 }
@@ -232,7 +232,7 @@ task vec_dot(v1, v2) {
     }
 }
 
-# 2D Rotation
+// 2D Rotation
 task rotate_point(point, angle_degrees) {
     angle = deg_to_rad(angle_degrees)
     cos_a = cos(angle)
@@ -241,10 +241,10 @@ task rotate_point(point, angle_degrees) {
     x_new = point.x * cos_a - point.y * sin_a
     y_new = point.x * sin_a + point.y * cos_a
     
-    give {x: x_new, y: y_new}
+    give {x= x_new, y= y_new}
 }
 
-# Statistics
+// Statistics
 task mean(arr) {
     sum = 0
     get val in arr {
@@ -267,7 +267,7 @@ task stddev(arr) {
     give sqrt(variance(arr))
 }
 
-# Rounding functions
+// Rounding functions
 task round(x) {
     when x >= 0 {
         give int(x + 0.5)
@@ -297,7 +297,7 @@ task ceil(x) {
     }
 }
 
-# Clamping
+// Clamping
 task clamp(value, min_val, max_val) {
     when value < min_val {
         give min_val
@@ -314,7 +314,7 @@ task lerp(a, b, t) {
     give a + (b - a) * clamp(t, 0, 1)
 }
 
-# Angle utilities
+// Angle utilities
 task angle_between(v1, v2) {
     dot = vec_dot(v1, v2)
     len1 = vec_length(v1)
@@ -328,11 +328,11 @@ task angle_between(v1, v2) {
     give rad_to_deg(acos_simple(cos_angle))
 }
 
-# Simple acos using approximation
+// Simple acos using approximation
 task acos_simple(x) {
     x = clamp(x, -1, 1)
     
-    # Use polynomial approximation
+    // Use polynomial approximation
     result = 1.5707963267948966 - x
     result = result - 0.5 * pow(x, 3) / 3
     result = result - 0.5 * 0.75 * pow(x, 5) / 5
@@ -341,9 +341,9 @@ task acos_simple(x) {
     give result
 }
 
-# Main example
+// Main example
 when __name__ == "__main__" {
-    # This runs when the file is executed directly
+    // This runs when the file is executed directly
     out "Math Library v1.0.0"
     test()
 }
